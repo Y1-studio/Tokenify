@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tokenify</title>
+    <style>
+        :root {
+            --bg-color: #0d0d0d; --panel-color: #1a1a1a; --text-color: #ececec;
+            --accent-color: #ff69b4; --border-color: #333;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color); color: var(--text-color);
+            margin: 0; display: flex; flex-direction: column; align-items: center; padding: 2rem;
+        }
+        .container { max-width: 900px; width: 100%; }
+        h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent-color); }
+        p { color: #aaa; margin-bottom: 2rem; }
+        .setup-panel {
+            background: var(--panel-color); padding: 1.5rem; border-radius: 12px;
+            border: 1px solid var(--border-color); margin-bottom: 2rem;
+            display: flex; flex-direction: column; gap: 1rem;
+        }
+        .file-input-group { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+        input[type="file"] { color: #aaa; font-size: 0.9rem; flex-grow: 1;}
+
+        .mode-toggles { display: flex; gap: 1rem; font-size: 0.85rem; color: #888; background: #000; padding: 8px 12px; border-radius: 8px;}
+        .mode-toggles label { cursor: pointer; }
+        .mode-toggles input { accent-color: var(--accent-color); margin-right: 4px; }
+
+        textarea {
+            width: 100%; height: 200px; background: var(--panel-color);
+            color: var(--text-color); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 1rem; font-size: 1rem;
+            resize: vertical; box-sizing: border-box; outline: none;
+            direction: auto;
+        }
+        textarea:focus { border-color: var(--accent-color); }
+        .stats-bar {
+            display: flex; gap: 2rem; margin: 1rem 0;
+            font-weight: bold; font-family: monospace;
+        }
+        .stat-item span { color: var(--accent-color); }
+        .output-area {
+            background: var(--panel-color); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 1rem; line-height: 2;
+            white-space: pre-wrap; word-wrap: break-word; min-height: 100px;
+            direction: auto;
+            font-size: 1.1rem;
+        }
+        .tkn { padding: 0 2px; border-radius: 3px; cursor: pointer; transition: filter 0.2s; }
+        .tkn:hover { filter: brightness(1.3); }
+        .c0 { background-color: rgba(158, 158, 158, 0.3); }
+        .c1 { background-color: rgba(100, 149, 237, 0.3); }
+        .c2 { background-color: rgba(80, 200, 120, 0.3); }
+        .c3 { background-color: rgba(255, 165, 0, 0.3); }
+        .c4 { background-color: rgba(233, 30, 99, 0.3); }
+        .status-msg { font-size: 0.85rem; font-weight: bold; }
+        .cont-byte { opacity: 0.4; font-size: 0.8em; user-select: none; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Tokenify</h1>
+        <p></p>
+
+        <div class="setup-panel">
+            <strong>1. Select Tokenizer File (JSON)</strong>
+            <div class="file-input-group">
+                <input type="file" id="vocabFile" accept=".json">
+                <div class="mode-toggles">
+                    <label><input type="radio" name="encMode" value="auto" checked> Auto-Detect</label>
+                    <label><input type="radio" name="encMode" value="byte"> Byte </label>
+                    <label><input type="radio" name="encMode" value="text"> Text </label>
+                </div>
+            </div>
+            <div id="status" class="status-msg" style="color:#aaa;"> Awaiting vocabulary file upload...</div>
+        </div>
+
+        <strong>2. Enter some text</strong>
+        <textarea id="inputText" placeholder="Type here..."></textarea>
+
+        <div class="stats-bar">
+            <div class="stat-item">Tokens: <span id="tokenCount">0</span></div>
+            <div class="stat-item">Characters: <span id="charCount">0</span></div>
+        </div>
+
+        <div class="output-area" id="output"></div>
+    </div>
+
+    <script>
+        // Standard GPT-2 / HuggingFace Byte-to-Unicode Mapping
+        const getBytesToUnicode = () => {
+            const bs = [];
+            for (let i = 33; i <= 126; i++) bs.push(i);
+            for (let i = 161; i <= 172; i++) bs.push(i);
+            for (let i = 174; i <= 255; i++) bs.push(i);
+
+            const map = {};
+            let n = 0;
+            for (let b = 0; b < 256; b++) {
+                if (bs.includes(b)) {
+                    map[b] = String.fromCharCode(b);
+                } else {
+                    map[b] = String.fromCharCode(256 + n);
+                    n++;
+                }
+            }
+            return map;
+        };
+
+        const byteToCharMap = getBytesToUnicode();
+
+        class TrieNode { constructor() { this.children = {}; this.tokenId = null; } }
+        class TokenTrie {
+            constructor() { this.root = new TrieNode(); }
+            insert(word, id) {
+                let node = this.root;
+                for (const char of word) {
+                    if (!node.children[char]) node.children[char] = new TrieNode();
+                    node = node.children[char];
+                }
+                node.tokenId = id;
+            }
+            findLongestMatch(text, pos) {
+                let node = this.root; let longestMatch = null; let length = 0;
+                for (let i = pos; i < text.length; i++) {
+                    const char = text[i];
+                    if (!node.children[char]) break;
+                    node = node.children[char];
+                    if (node.tokenId !== null) { longestMatch = text.substring(pos, i + 1); length = i + 1 - pos; }
+                }
+                return { match: longestMatch, length: length };
+            }
+        }
+
+        let trie = null; let vocabMap = null; let detectedMode = "text";
+        const utf8Encoder = new TextEncoder();
+
+        const vocabFileInput = document.getElementById('vocabFile');
+        const inputText = document.getElementById('inputText');
+        const output = document.getElementById('output');
+        const tokenCountDisplay = document.getElementById('tokenCount');
+        const charCountDisplay = document.getElementById('charCount');
+        const statusMsg = document.getElementById('status');
+        const radios = document.getElementsByName('encMode');
+
+        function autoDetectEncoding(vocab) {
+            // YOUR IDEA: Direct exact-match check for native characters.
+            // If the literal character exists in the vocab, it CANNOT be a byte-level BPE model.
+            if ("א" in vocab || "ש" in vocab) return "text"; // Hebrew Aleph / Shin
+            if ("م" in vocab || "д" in vocab) return "text"; // Arabic / Cyrillic
+
+            // SentencePiece Llama-1/2 style Spaces
+            if (" " in vocab) return "text";
+
+            // GPT-2 / Llama-3 style Byte Spaces
+            if ("Ġ" in vocab || "Ġthe" in vocab) return "byte";
+
+            // Default fallback for modern standard models
+            return "byte";
+        }
+
+        vocabFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            try {
+                statusMsg.innerText = "Processing vocabulary data...";
+                statusMsg.style.color = "#aaa";
+                const text = await file.text();
+                const jsonData = JSON.parse(text);
+                let rawVocab = (jsonData.model && jsonData.model.vocab) ? jsonData.model.vocab :
+                               (typeof jsonData === 'object' && !Array.isArray(jsonData)) ? jsonData : null;
+                if (!rawVocab) throw new Error("Format error");
+
+                trie = new TokenTrie();
+                vocabMap = rawVocab;
+                for (const [word, id] of Object.entries(rawVocab)) trie.insert(word, id);
+
+                detectedMode = autoDetectEncoding(rawVocab);
+                let modeText = detectedMode === "byte" ? "(Byte)" : "(Text)";
+
+                statusMsg.innerText = `Vocabulary loaded successfully. Detected Mode:  ${modeText}`;
+                statusMsg.style.color = "#4ade80";
+                processText();
+            } catch (err) {
+                statusMsg.innerText = "Error: Invalid file format or corrupted JSON.";
+                statusMsg.style.color = "#f87171";
+            }
+        });
+
+        inputText.addEventListener('input', processText);
+        radios.forEach(r => r.addEventListener('change', processText));
+
+        function processText() {
+            const text = inputText.value;
+            charCountDisplay.innerText = text.length;
+            if (!trie || text.length === 0) {
+                output.innerHTML = '';
+                tokenCountDisplay.innerText = '0';
+                return;
+            }
+
+            let selectedRadio = document.querySelector('input[name="encMode"]:checked').value;
+            let currentMode = selectedRadio === "auto" ? detectedMode : selectedRadio;
+
+            let tokens = [];
+
+            if (currentMode === "byte") {
+                const bytes = utf8Encoder.encode(text);
+                let bpeString = "";
+                for (let i = 0; i < bytes.length; i++) bpeString += byteToCharMap[bytes[i]];
+
+                let pos = 0;
+                while (pos < bpeString.length) {
+                    const { match, length } = trie.findLongestMatch(bpeString, pos);
+                    if (match) {
+                        tokens.push({ id: vocabMap[match], byteLen: length });
+                        pos += length;
+                    } else {
+                        tokens.push({ id: 'Unknown', byteLen: 1 });
+                        pos++;
+                    }
+                }
+            } else {
+                let searchString = text.replace(/ /g, '▁');
+                let pos = 0;
+                while (pos < searchString.length) {
+                    const { match, length } = trie.findLongestMatch(searchString, pos);
+                    if (match) {
+                        tokens.push({ id: vocabMap[match], charLen: length });
+                        pos += length;
+                    } else {
+                        tokens.push({ id: 'Unknown', charLen: 1 });
+                        pos++;
+                    }
+                }
+            }
+
+            renderTokens(text, tokens, currentMode);
+            tokenCountDisplay.innerText = tokens.length;
+        }
+
+        function renderTokens(originalText, tokens, mode) {
+            output.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+
+            if (mode === "byte") {
+                let charToBytesMap = [];
+                for (let i = 0; i < originalText.length; i++) {
+                    let char = originalText[i];
+                    let encodedLen = utf8Encoder.encode(char).length;
+                    for (let j = 0; j < encodedLen; j++) {
+                        charToBytesMap.push({ char: char, isFirstByte: j === 0 });
+                    }
+                }
+
+                let bytePos = 0;
+                tokens.forEach((t, index) => {
+                    const span = document.createElement('span');
+                    span.className = `tkn c${index % 5}`;
+                    span.title = `Token ID: ${t.id}`;
+
+                    let displayHtml = "";
+                    for (let i = 0; i < t.byteLen; i++) {
+                        let mapping = charToBytesMap[bytePos + i];
+                        if (mapping && mapping.isFirstByte) {
+                            displayHtml += mapping.char;
+                        } else if (mapping && !mapping.isFirstByte && t.byteLen === 1) {
+                            displayHtml += `<span class="cont-byte">·</span>`;
+                        }
+                    }
+
+                    displayHtml = displayHtml.replace(/\n/g, '↵<br>');
+                    if (displayHtml === "") displayHtml = "&nbsp;";
+
+                    span.innerHTML = displayHtml;
+                    fragment.appendChild(span);
+                    bytePos += t.byteLen;
+                });
+            } else {
+                let charPos = 0;
+                tokens.forEach((t, index) => {
+                    const span = document.createElement('span');
+                    span.className = `tkn c${index % 5}`;
+                    let originalChars = originalText.substring(charPos, charPos + t.charLen);
+                    span.innerText = originalChars.replace(/\n/g, '↵\n') || " ";
+                    span.title = `Token ID: ${t.id}`;
+                    fragment.appendChild(span);
+                    charPos += t.charLen;
+                });
+            }
+            output.appendChild(fragment);
+        }
+    </script>
+</body>
+</html>
